@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BigSeller Ultimate Analytics Suite (Stock + Custom Range + Sort)
 // @namespace    http://tampermonkey.net/
-// @version      7.1
+// @version      7.2
 // @description  Gabungan Analisa SKU & Stok (Realtime) + Analisa Komparasi Custom Range (Full Page) dengan Fitur Sort
 // @author       Gemini AI
 // @match        https://www.bigseller.com/web/*
