@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BigSeller Ultimate Analytics Suite (Stock + Custom Range + Sort)
 // @namespace    http://tampermonkey.net/
-// @version      7.2
+// @version      7.3
 // @description  Gabungan Analisa SKU & Stok (Realtime) + Analisa Komparasi Custom Range (Full Page) dengan Fitur Sort
 // @author       Gemini AI
 // @match        https://www.bigseller.com/web/*
@@ -16,6 +16,10 @@
     let currentData = [];
     let sortConfig = { key: 't0', direction: 'desc' };
     const container = document.createElement('div');
+
+    // VARIABLE BARU UNTUK CACHE
+    let historicalMaster = null; // Menyimpan data history agar tidak perlu fetch ulang
+    let isStockLoaded = false;   // Penanda apakah dashboard sudah pernah dibuka
 
     // --- SETUP CONTAINER UTAMA (FULL PAGE) ---
     container.style.cssText = `
@@ -82,7 +86,7 @@
             border-radius: 4px;
             padding: 0 10px;
             display: flex; align-items: center; justify-content: center;
-            height: 34px; margin-top: 5px; font-size: 12px;
+            height: 34px; margin-top: 0px; font-size: 12px;
             text-decoration: none; font-weight: 600;
             box-shadow: 0 3px 6px ${shadowColor};
             cursor: pointer; white-space: nowrap; transition: all 0.3s ease;
@@ -113,52 +117,105 @@
         });
     };
 
-    // --- MODULE 1: STOCK DASHBOARD LOGIC ---
+    // --- MODULE 1: STOCK DASHBOARD LOGIC (OPTIMIZED) ---
     function openStockDashboard() {
         container.style.display = 'block';
-        sortConfig = { key: 't0', direction: 'desc' }; // Reset sort
+
+        // Logika Baru: Jika sudah pernah diload, jangan fetch lagi. Langsung render.
+        if (isStockLoaded) {
+            return; // Data sudah ada, tampilan sudah muncul (block)
+        }
+
+        // Jika belum pernah, load data (full)
+        sortConfig = { key: 't0', direction: 'desc' };
         loadStockData();
     }
 
+    // Fungsi ini menangani First Load & Refresh
     async function loadStockData() {
-        container.innerHTML = '<div style="display:flex;justify-content:center;align-items:center;height:100%;"><h2 style="color:#001529;">⏳ Mengambil Data Real-time & Stok...</h2></div>';
+        const isRefreshed = isStockLoaded; // Jika true, berarti ini Refresh manual
+        container.innerHTML = `<div style="display:flex;justify-content:center;align-items:center;height:100%;"><h2 style="color:#001529;">⏳ ${isRefreshed ? 'Memperbarui Data NOW...' : 'Mengambil Data Lengkap...'}</h2></div>`;
 
+        // 1. Fetch Today (Selalu dilakukan baik first load maupun refresh)
         const pToday = {
             groupType: 1, warehouseIdList: [], orderBy: "saleNum", desc: true,
             currentDate: getFormatDate(0), currentTime: getFormatDate(0) + " 23:59:59",
             currency: "IDR", curTheme: "dark", platformList: [], shopIdList: [], shopGroupIdList: [], zone: "GMT+07:00"
         };
 
-        const getValidPayload = (start, end) => `currency=IDR&pageSize=1000&pageNo=1&platform=&searchType=sku&searchContent=&inquireType=0&beginDate=${start}&endDate=${end}&orderBy=efficientsOrders&desc=1&categoryList=&warehouseIds=&evalationOrder=0&groupFields=sku&spuId=&shopIds=&groupType=1&dimension=`;
+        const todayPromise = apiRequest('https://www.bigseller.com/api/v1/data/dashboard/skuSaleStatNew.json', pToday, true);
 
-        const [dT, d1, d2, d7, d7p, d30, d30p] = await Promise.all([
-            apiRequest('https://www.bigseller.com/api/v1/data/dashboard/skuSaleStatNew.json', pToday, true),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(1), getFormatDate(1))).then(d => d.rows || []),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(2), getFormatDate(2))).then(d => d.rows || []),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(7), getFormatDate(1))).then(d => d.rows || []),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(14), getFormatDate(8))).then(d => d.rows || []),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(30), getFormatDate(1))).then(d => d.rows || []),
-            apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(60), getFormatDate(31))).then(d => d.rows || [])
-        ]);
+        // 2. Fetch History (HANYA JIKA historicalMaster masih kosong)
+        let historyDataPromises = [];
+        if (!historicalMaster) {
+            const getValidPayload = (start, end) => `currency=IDR&pageSize=1000&pageNo=1&platform=&searchType=sku&searchContent=&inquireType=0&beginDate=${start}&endDate=${end}&orderBy=efficientsOrders&desc=1&categoryList=&warehouseIds=&evalationOrder=0&groupFields=sku&spuId=&shopIds=&groupType=1&dimension=`;
 
-        processStockData(dT, d1, d2, d7, d7p, d30, d30p);
-    }
+            historyDataPromises = Promise.all([
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(1), getFormatDate(1))).then(d => d.rows || []),
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(2), getFormatDate(2))).then(d => d.rows || []),
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(7), getFormatDate(1))).then(d => d.rows || []),
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(14), getFormatDate(8))).then(d => d.rows || []),
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(30), getFormatDate(1))).then(d => d.rows || []),
+                apiRequest('https://www.bigseller.com/api/v1/skuSales/skuPageList.json', getValidPayload(getFormatDate(60), getFormatDate(31))).then(d => d.rows || [])
+            ]);
+        } else {
+            // Jika refresh, history pakai yg lama saja (langsung resolve)
+            historyDataPromises = Promise.resolve(null);
+        }
 
-    function processStockData(dT, d1, d2, d7, d7p, d30, d30p) {
-        const master = {};
-        const process = (data, key) => {
-            data.forEach(item => {
-                if (!master[item.sku]) master[item.sku] = { sku: item.sku, title: item.title, t0:0, v1:0, v7:0, v7p:0, v30:0, v30p:0, stok: item.wholeWarehouseAvailable || 0 };
-                master[item.sku][key] = item.efficientsVolume || 0;
-                if (item.wholeWarehouseAvailable !== undefined) master[item.sku].stok = item.wholeWarehouseAvailable;
-            });
-        };
+        // Tunggu semua selesai
+        const [dT, historyResults] = await Promise.all([todayPromise, historyDataPromises]);
 
-        process(d1, 'v1'); process(d2, 'v2'); process(d7, 'v7'); process(d7p, 'v7p'); process(d30, 'v30'); process(d30p, 'v30p');
+        // 3. Proses Data History (Hanya sekali di awal)
+        if (historyResults) {
+            historicalMaster = {};
+            const [d1, d2, d7, d7p, d30, d30p] = historyResults;
 
-        dT.forEach(item => { if (master[item.sku]) master[item.sku].t0 = item.saleNum; });
+            const process = (data, key) => {
+                data.forEach(item => {
+                    if (!historicalMaster[item.sku]) {
+                        historicalMaster[item.sku] = {
+                            sku: item.sku, title: item.title,
+                            v1:0, v7:0, v7p:0, v30:0, v30p:0,
+                            stok: item.wholeWarehouseAvailable || 0
+                        };
+                    }
+                    historicalMaster[item.sku][key] = item.efficientsVolume || 0;
+                    if (item.wholeWarehouseAvailable !== undefined) historicalMaster[item.sku].stok = item.wholeWarehouseAvailable;
+                });
+            };
 
-        currentData = Object.values(master).map(m => {
+            process(d1, 'v1'); process(d2, 'v2'); process(d7, 'v7'); process(d7p, 'v7p'); process(d30, 'v30'); process(d30p, 'v30p');
+        }
+
+        // 4. Merge Data Today ke dalam Data View
+        // Kita copy historicalMaster agar master asli tidak terkotori oleh t0 yang berubah-ubah
+        // Atau kita bangun currentData baru berdasarkan master + dT
+
+        // Buat map sementara untuk penggabungan cepat
+        const finalMap = {};
+
+        // Masukkan data history dulu
+        for (let sku in historicalMaster) {
+            finalMap[sku] = { ...historicalMaster[sku], t0: 0 }; // Default t0 = 0
+        }
+
+        // Masukkan/Update data Today
+        dT.forEach(item => {
+            if (!finalMap[item.sku]) {
+                // Jika SKU baru muncul hari ini (tidak ada di history)
+                finalMap[item.sku] = {
+                    sku: item.sku, title: item.title,
+                    v1:0, v7:0, v7p:0, v30:0, v30p:0,
+                    stok: item.available || 0,
+                    t0: 0
+                };
+            }
+            finalMap[item.sku].t0 = item.saleNum;
+        });
+
+        // 5. Kalkulasi Akhir
+        currentData = Object.values(finalMap).map(m => {
             const calcG = (c, p) => p === 0 ? (c > 0 ? 100 : 0) : ((c - p) / p) * 100;
             return {
                 ...m,
@@ -170,6 +227,7 @@
             };
         });
 
+        isStockLoaded = true; // Tandai sudah loaded
         renderStockTable();
     }
 
@@ -185,9 +243,9 @@
         let html = `
             <div style="max-width:1400px; margin:0 auto; background:white; padding:20px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.1);">
                 <div style="display:flex; justify-content:space-between; margin-bottom:20px; align-items:center;">
-                    <div><h1 style="margin:0; font-size:24px; color:#001529;">🚀 Dashboard SKU & Stok</h1><p style="margin:5px 0 0; color:#666; font-size:13px;">Updated: ${new Date().toLocaleTimeString()}</p></div>
+                    <div><h1 style="margin:0; font-size:24px; color:#001529;">🚀 Dashboard SKU & Stok</h1><p style="margin:5px 0 0; color:#666; font-size:13px;">Data Updated: ${new Date().toLocaleTimeString()}</p></div>
                     <div>
-                        <button id="refreshBtn" style="background:#1890ff; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">🔄 Refresh</button>
+                        <button id="refreshBtn" style="background:#1890ff; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">🔄 Refresh NOW</button>
                         <button id="exportBtn" style="background:#52c41a; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">📥 Excel</button>
                         <button id="closeBtn" style="background:#ff4d4f; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer;">✖ Tutup</button>
                     </div>
@@ -239,7 +297,7 @@
         container.innerHTML = html;
 
         document.getElementById('closeBtn').onclick = () => container.style.display = 'none';
-        document.getElementById('refreshBtn').onclick = loadStockData;
+        document.getElementById('refreshBtn').onclick = loadStockData; // Ini akan memanggil ulang data, tapi pakai cache history
         document.getElementById('exportBtn').onclick = () => exportToCSV(currentData, 'Stock_Analysis');
 
         container.querySelectorAll('.sortable').forEach(th => {
@@ -330,7 +388,7 @@
             return { ...m, diff, growth };
         });
 
-        // Set default sort logic in Config before rendering
+        // Sort default by Diff Desc
         sortConfig = { key: 'diff', direction: 'desc' };
         renderCustomTable();
     }
