@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         BigSeller Ultimate Analytics Suite (Stock + Custom Range)
+// @name         BigSeller Ultimate Analytics Suite (Stock + Custom Range + Sort)
 // @namespace    http://tampermonkey.net/
-// @version      7.0
-// @description  Gabungan Analisa SKU & Stok (Realtime) + Analisa Komparasi Custom Range (Full Page)
+// @version      7.1
+// @description  Gabungan Analisa SKU & Stok (Realtime) + Analisa Komparasi Custom Range (Full Page) dengan Fitur Sort
 // @author       Gemini AI
 // @match        https://www.bigseller.com/web/*
 // @grant        GM_xmlhttpRequest
@@ -82,7 +82,7 @@
             border-radius: 4px;
             padding: 0 10px;
             display: flex; align-items: center; justify-content: center;
-            height: 34px; margin-top: 0px; font-size: 12px;
+            height: 34px; margin-top: 5px; font-size: 12px;
             text-decoration: none; font-weight: 600;
             box-shadow: 0 3px 6px ${shadowColor};
             cursor: pointer; white-space: nowrap; transition: all 0.3s ease;
@@ -256,6 +256,7 @@
     // --- MODULE 2: CUSTOM RANGE LOGIC (NO STOCK) ---
     function openCustomDashboard() {
         container.style.display = 'block';
+        sortConfig = { key: 'diff', direction: 'desc' }; // Reset sort for custom
         if (!document.getElementById('custom-filters')) renderCustomLayout();
     }
 
@@ -329,28 +330,40 @@
             return { ...m, diff, growth };
         });
 
-        // Sort default by Diff Desc
-        currentData.sort((a,b) => b.diff - a.diff);
+        // Set default sort logic in Config before rendering
+        sortConfig = { key: 'diff', direction: 'desc' };
         renderCustomTable();
     }
 
     function renderCustomTable() {
+        // 1. Sort Data berdasarkan Config
+        const sorted = [...currentData].sort((a, b) => {
+            const valA = a[sortConfig.key];
+            const valB = b[sortConfig.key];
+            return sortConfig.direction === 'asc' ? valA - valB : valB - valA;
+        });
+
+        // 2. Icon Helper
+        const getIcon = (k) => sortConfig.key === k ? (sortConfig.direction === 'asc' ? ' 🔼' : ' 🔽') : ' ↕️';
+
         const resArea = document.getElementById('resultAreaCompare');
         let html = `
             <table style="width:100%; border-collapse:collapse; text-align:center; font-size:13px;">
                 <thead style="position:sticky; top:0; background:#fafafa; z-index:10;">
                     <tr style="color:white;">
                         <th style="padding:15px; text-align:left; background:#595959; width:300px;color:white;">SKU / Produk</th>
-                        <th style="padding:12px; background:#8c8c8c;color:white;">Periode 1</th>
-                        <th style="padding:12px; background:#722ed1;color:white;">Periode 2</th>
-                        <th style="padding:12px; background:#13c2c2;color:white;">Selisih (Unit)</th>
-                        <th style="padding:12px; background:#eb2f96;color:white;">Growth %</th>
+
+                        <th class="sortable" data-key="valA" style="padding:12px; background:#8c8c8c; cursor:pointer;color:white;">Periode 1${getIcon('valA')}</th>
+                        <th class="sortable" data-key="valB" style="padding:12px; background:#722ed1; cursor:pointer;color:white;">Periode 2${getIcon('valB')}</th>
+
+                        <th class="sortable" data-key="diff" style="padding:12px; background:#13c2c2; cursor:pointer;color:white;">Selisih (Unit)${getIcon('diff')}</th>
+                        <th class="sortable" data-key="growth" style="padding:12px; background:#eb2f96; border-radius:0 4px 4px 0; cursor:pointer;color:white;">Growth %${getIcon('growth')}</th>
                     </tr>
                 </thead>
                 <tbody>
         `;
 
-        currentData.forEach((m, idx) => {
+        sorted.forEach((m, idx) => {
             const bg = idx % 2 === 0 ? '#fff' : '#f9f9f9';
             const diffColor = m.diff > 0 ? '#52c41a' : (m.diff < 0 ? '#f5222d' : '#bfbfbf');
             const diffSign = m.diff > 0 ? '+' : '';
@@ -365,6 +378,16 @@
         });
         html += '</tbody></table>';
         resArea.innerHTML = html;
+
+        // 3. Add Event Listeners for Sorting
+        resArea.querySelectorAll('.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                const key = th.getAttribute('data-key');
+                sortConfig.direction = (sortConfig.key === key && sortConfig.direction === 'desc') ? 'asc' : 'desc';
+                sortConfig.key = key;
+                renderCustomTable(); // Re-render with new sort
+            });
+        });
     }
 
     // --- SHARED EXPORT FUNCTION ---
