@@ -1,19 +1,17 @@
 // ==UserScript==
 // @name         BigSeller Ultimate Analytics Suite (Stock Optimized + Custom Range)
 // @namespace    http://tampermonkey.net/
-// @version      8.0
+// @version      8.1
 // @description  Analisa SKU & Stok (Smart Refresh) + Analisa Komparasi Custom Range
 // @author       Gemini AI
 // @match        https://www.bigseller.com/web/*
 // @grant        GM_xmlhttpRequest
 // @connect      www.bigseller.com
 // ==/UserScript==
-
 (function() {
     'use strict';
 
     // --- GLOBAL STATE MANAGEMENT (CACHING) ---
-    // Menyimpan data hasil fetch agar tidak hilang saat menu ditutup/buka kembali
     const CACHE = {
         stock: null,      // Modul 1
         skuCustom: null,  // Modul 2
@@ -21,7 +19,6 @@
         yearly: null      // Modul 4
     };
 
-    // Menyimpan history data statis untuk Modul 1 (agar refresh hanya hit API Now)
     let historicalMasterStock = null;
 
     // --- SORT CONFIGURATIONS ---
@@ -49,7 +46,6 @@
     };
     const formatRupiah = (val) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(val);
 
-    // Sort Helper (Number & String)
     const genericSort = (list, config) => {
         return list.sort((a, b) => {
             let valA = a[config.key];
@@ -132,26 +128,26 @@
 
 
     // =========================================================================
-    // MODUL 1: ANALISA SKU & STOK
+    // MODUL 1: ANALISA SKU & STOK (UPDATED WITH REAL INVENTORY API)
     // =========================================================================
     function openStockDashboard() {
         container.style.display = 'block';
-        // Cek Cache
         if (CACHE.stock) {
-            renderStockTable(); // Render langsung dari memory
+            renderStockTable();
         } else {
-            loadStockData(); // Fetch pertama kali
+            loadStockData();
         }
     }
 
     async function loadStockData() {
         const isRefreshed = CACHE.stock !== null;
-        container.innerHTML = `<div style="display:flex;justify-content:center;align-items:center;height:100%;"><h2 style="color:#001529;">⏳ ${isRefreshed ? 'Update Data Realtime...' : 'Mengambil Data Lengkap...'}</h2></div>`;
+        container.innerHTML = `<div style="display:flex;justify-content:center;align-items:center;height:100%;"><h2 style="color:#001529;">⏳ ${isRefreshed ? 'Update Data Realtime...' : 'Mengambil Data Penjualan & Stok Gudang...'}</h2></div>`;
 
+        // 1. Fetch Sales Today
         const pToday = { groupType: 1, warehouseIdList: [], orderBy: "saleNum", desc: true, currentDate: getFormatDate(0), currentTime: getFormatDate(0) + " 23:59:59", currency: "IDR", curTheme: "dark", platformList: [], shopIdList: [], shopGroupIdList: [], zone: "GMT+07:00" };
         const todayPromise = apiRequest('https://www.bigseller.com/api/v1/data/dashboard/skuSaleStatNew.json', pToday, true);
 
-        // Fetch History hanya jika belum punya master
+        // 2. Fetch Sales History (Only if not cached/mastered)
         let historyDataPromises = Promise.resolve(null);
         if (!historicalMasterStock) {
             const getValidPayload = (start, end) => `currency=IDR&pageSize=1000&pageNo=1&platform=&searchType=sku&searchContent=&inquireType=0&beginDate=${start}&endDate=${end}&orderBy=efficientsOrders&desc=1&categoryList=&warehouseIds=&evalationOrder=0&groupFields=sku&spuId=&shopIds=&groupType=1&dimension=`;
@@ -165,22 +161,81 @@
             ]);
         }
 
-        const [dT, historyResults] = await Promise.all([todayPromise, historyDataPromises]);
+        // 3. Fetch Real Inventory (NEW API)
+        // Menggunakan payload spesifik yang direquest user
+        // Note: pageSize di set ke 2000 untuk keamanan agar semua SKU terambil
+        const inventoryPayload = "pageNo=1&pageSize=2000&searchType=skuName&searchContent=&inquireType=0&stockStatus=&isGroup=0&orderBy=&desc=&fullCid=&queryDistribution=1&saleState=&zoneId=&openFlag=false&hideZeroInventorySku=0&warehouseIds=44270";
+        const inventoryPromise = apiRequest('https://www.bigseller.com/api/v1/inventory/pageList.json', inventoryPayload, false)
+            .then(data => (data.page && data.page.rows) ? data.page.rows : []);
 
+        // EXECUTE ALL PROMISES
+        const [dT, historyResults, inventoryRows] = await Promise.all([todayPromise, historyDataPromises, inventoryPromise]);
+
+        // Process Real Inventory Map
+        const stockMap = {};
+        if (inventoryRows && inventoryRows.length > 0) {
+            inventoryRows.forEach(row => {
+                stockMap[row.sku] = row.available - 1000; // Mengambil key 'available' dari inventory
+            });
+        }
+
+        // Process Sales History
         if (historyResults) {
             historicalMasterStock = {};
             const [d1, d2, d7, d7p, d30, d30p] = historyResults;
-            const process = (data, key) => { data.forEach(item => { if (!historicalMasterStock[item.sku]) { historicalMasterStock[item.sku] = { sku: item.sku, title: item.title, v1:0, v7:0, v7p:0, v30:0, v30p:0, stok: item.wholeWarehouseAvailable || 0 }; } historicalMasterStock[item.sku][key] = item.efficientsVolume || 0; if (item.wholeWarehouseAvailable !== undefined) historicalMasterStock[item.sku].stok = item.wholeWarehouseAvailable; }); };
+            const process = (data, key) => {
+                data.forEach(item => {
+                    if (!historicalMasterStock[item.sku]) {
+                        historicalMasterStock[item.sku] = { sku: item.sku, title: item.title, v1:0, v7:0, v7p:0, v30:0, v30p:0 };
+                    }
+                    historicalMasterStock[item.sku][key] = item.efficientsVolume || 0;
+                });
+            };
             process(d1, 'v1'); process(d2, 'v2'); process(d7, 'v7'); process(d7p, 'v7p'); process(d30, 'v30'); process(d30p, 'v30p');
         }
 
+        // Merge Everything
         const finalMap = {};
-        for (let sku in historicalMasterStock) finalMap[sku] = { ...historicalMasterStock[sku], t0: 0 };
-        dT.forEach(item => { if (!finalMap[item.sku]) finalMap[item.sku] = { sku: item.sku, title: item.title, v1:0, v7:0, v7p:0, v30:0, v30p:0, stok: item.available || 0, t0: 0 }; finalMap[item.sku].t0 = item.saleNum; });
+        for (let sku in historicalMasterStock) finalMap[sku] = { ...historicalMasterStock[sku], t0: 0, stok: 0 }; // Init stok 0
+
+        // Add Today's Sales
+        dT.forEach(item => {
+            if (!finalMap[item.sku]) finalMap[item.sku] = { sku: item.sku, title: item.title, v1:0, v7:0, v7p:0, v30:0, v30p:0, t0: 0, stok: 0 };
+            finalMap[item.sku].t0 = item.saleNum;
+        });
+
+        // Add Real Inventory Stock (Override sales API stock)
+        for (let sku in finalMap) {
+            if (stockMap[sku] !== undefined) {
+                finalMap[sku].stok = stockMap[sku];
+            } else {
+                // Try catch if sku in inventory but not in sales history yet?
+                // Logic ini hanya map ke sales history. Jika item ada di inventory tapi blm pernah laku, mungkin tidak muncul disini.
+                // Jika ingin memunculkan semua inventory, kita perlu loop inventoryRows juga.
+                // Untuk sekarang kita ikut logic existing: Basis Sales + Insert Stock.
+            }
+        }
+
+        // Jika item ada di inventory tapi belum ada sales record (optional, uncomment jika perlu)
+        /*
+        inventoryRows.forEach(row => {
+            if (!finalMap[row.sku]) {
+                finalMap[row.sku] = { sku: row.sku, title: row.title || row.sku, v1:0, v7:0, v7p:0, v30:0, v30p:0, t0: 0, stok: row.available };
+            }
+        });
+        */
 
         CACHE.stock = Object.values(finalMap).map(m => {
             const calcG = (c, p) => p === 0 ? (c > 0 ? 100 : 0) : ((c - p) / p) * 100;
-            return { ...m, gt: calcG(m.t0, m.v1), g7: calcG(m.v7, m.v7p), g30: calcG(m.v30, m.v30p), adjStock: m.stok - 1000, dailyGap: m.v1 - m.t0 };
+            return {
+                ...m,
+                gt: calcG(m.t0, m.v1),
+                g7: calcG(m.v7, m.v7p),
+                g30: calcG(m.v30, m.v30p),
+                adjStock: m.stok - (m.v1 - m.t0), // Kalkulasi custom user
+                realStock: m.stok,       // Raw stock untuk display jika perlu
+                dailyGap: m.v1 - m.t0
+            };
         });
 
         renderStockTable();
@@ -190,7 +245,7 @@
         const sorted = genericSort([...CACHE.stock], SORT_CONFIGS.stock);
         const icon = (k) => getIcon(k, SORT_CONFIGS.stock);
 
-        let html = `<div style="width:98%; margin:0 auto; background:white; padding:20px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.1);"><div style="display:flex; justify-content:space-between; margin-bottom:20px; align-items:center;"><div><h1 style="margin:0; font-size:24px; color:#001529;">🚀 Dashboard SKU & Stok</h1><p style="margin:5px 0 0; color:#666; font-size:13px;">Last Update: ${new Date().toLocaleTimeString()}</p></div><div><button id="refreshBtn" style="background:#1890ff; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">🔄 Refresh NOW</button><button id="exportBtn" style="background:#52c41a; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">📥 Excel</button><button id="closeBtn" style="background:#ff4d4f; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer;">✖ Tutup</button></div></div><div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; text-align:center;">
+        let html = `<div style="width:98%; margin:0 auto; background:white; padding:20px; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.1);"><div style="display:flex; justify-content:space-between; margin-bottom:20px; align-items:center;"><div><h1 style="margin:0; font-size:24px; color:#001529;">🚀 Dashboard SKU & Stok (Real Inventory)</h1><p style="margin:5px 0 0; color:#666; font-size:13px;">Last Update: ${new Date().toLocaleTimeString()}</p></div><div><button id="refreshBtn" style="background:#1890ff; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">🔄 Refresh NOW</button><button id="exportBtn" style="background:#52c41a; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer; margin-right:10px;">📥 Excel</button><button id="closeBtn" style="background:#ff4d4f; color:white; border:none; padding:8px 15px; border-radius:4px; font-weight:bold; cursor:pointer;">✖ Tutup</button></div></div><div style="overflow-x:auto;"><table style="width:100%; border-collapse:collapse; text-align:center;">
         <thead style="position:sticky; top:0; background:#fafafa; z-index:10;">
             <tr style="color:white; font-size:13px;">
                 <th class="sortable" data-key="sku" style="padding:15px; text-align:left; background:#595959; color:white; cursor:pointer;">SKU / Produk${icon('sku')}</th>
@@ -200,14 +255,14 @@
                 <th class="sortable" data-key="v7" style="padding:10px; background:#d46b08; cursor:pointer; color:white;">7D (Last vs Prev)${icon('v7')}</th>
                 <th class="sortable" data-key="v30" style="padding:10px; background:#c41d7f; cursor:pointer; color:white;">30D (Last vs Prev)${icon('v30')}</th>
                 <th class="sortable" data-key="dailyGap" style="padding:10px; background:#096dd9; border-left:2px solid white; cursor:pointer; color:white;">YESTERDAY - NOW${icon('dailyGap')}</th>
-                <th class="sortable" data-key="adjStock" style="padding:10px; background:#874d00; cursor:pointer; color:white;">STOCK${icon('adjStock')}</th>
+                <th class="sortable" data-key="realStock" style="padding:10px; background:#874d00; cursor:pointer; color:white;">STOCK (REAL)${icon('realStock')}</th>
                 <th class="sortable" data-key="adjStock" style="padding:10px; background:#22075e; cursor:pointer; color:white;">STATUS STOCK${icon('adjStock')}</th>
             </tr>
         </thead><tbody>`;
 
         sorted.forEach((m, idx) => {
             const bg = idx % 2 === 0 ? '#fff' : '#f9f9f9'; const renderBadge = (v) => `<b style="color:${v>0?'#52c41a':(v<0?'#f5222d':'#bfbfbf')}; font-size:13px;">${v>0?'+':''}${v.toFixed(1)}%</b>`;
-            html += `<tr style="background:${bg}; border-bottom:1px solid #eee;"><td style="padding:12px; text-align:left;"><div style="font-weight:700; color:#1890ff; font-size:15px;">${m.sku}</div><div style="font-size:11px; color:#666; max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${m.title}</div></td><td style="padding:10px; font-size:18px; font-weight:bold;">${m.t0}</td><td style="padding:10px; font-size:18px; font-weight:bold;">${m.v1}</td><td style="padding:10px;">${renderBadge(m.gt)}</td><td style="padding:10px;"><span style="font-weight:bold; font-size:16px;">${m.v7}</span> <span style="color:#8c8c8c; font-size:12px;">vs ${m.v7p}</span><br>${renderBadge(m.g7)}</td><td style="padding:10px;"><span style="font-weight:bold; font-size:16px;">${m.v30}</span> <span style="color:#8c8c8c; font-size:12px;">vs ${m.v30p}</span><br>${renderBadge(m.g30)}</td><td style="padding:10px; font-size:16px; font-weight:bold; color:${m.dailyGap>0?'#fa8c16':'#52c41a'}; border-left:1px solid #f0f0f0;">${m.dailyGap}</td><td style="padding:10px; font-size:18px; font-weight:bold; color:${m.adjStock<0?'#f5222d':'#262626'};">${m.adjStock}</td><td style="padding:10px;"><span style="background:${m.adjStock<0?'#fff1f0':'#f6ffed'}; color:${m.adjStock<0?'#f5222d':'#52c41a'}; padding:4px 10px; border-radius:15px; font-weight:bold; font-size:11px;">${m.adjStock<0?'⚠️ KURANG':'✅ AMAN'}</span></td></tr>`;
+            html += `<tr style="background:${bg}; border-bottom:1px solid #eee;"><td style="padding:12px; text-align:left;"><div style="font-weight:700; color:#1890ff; font-size:15px;">${m.sku}</div><div style="font-size:11px; color:#666; max-width:300px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${m.title}</div></td><td style="padding:10px; font-size:18px; font-weight:bold;">${m.t0}</td><td style="padding:10px; font-size:18px; font-weight:bold;">${m.v1}</td><td style="padding:10px;">${renderBadge(m.gt)}</td><td style="padding:10px;"><span style="font-weight:bold; font-size:16px;">${m.v7}</span> <span style="color:#8c8c8c; font-size:12px;">vs ${m.v7p}</span><br>${renderBadge(m.g7)}</td><td style="padding:10px;"><span style="font-weight:bold; font-size:16px;">${m.v30}</span> <span style="color:#8c8c8c; font-size:12px;">vs ${m.v30p}</span><br>${renderBadge(m.g30)}</td><td style="padding:10px; font-size:16px; font-weight:bold; color:${m.dailyGap>0?'#fa8c16':'#52c41a'}; border-left:1px solid #f0f0f0;">${m.dailyGap}</td><td style="padding:10px; font-size:18px; font-weight:bold; color:#262626;">${m.realStock}</td><td style="padding:10px;"><span style="background:${m.adjStock<0?'#fff1f0':'#f6ffed'}; color:${m.adjStock<0?'#f5222d':'#52c41a'}; padding:4px 10px; border-radius:15px; font-weight:bold; font-size:11px;">${m.adjStock<0?'⚠️ KURANG':'✅ AMAN'}</span> <span style="font-size:10px;color:#999">(${m.adjStock})</span></td></tr>`;
         });
         html += '</tbody></table></div></div>'; container.innerHTML = html;
         document.getElementById('closeBtn').onclick = () => container.style.display = 'none'; document.getElementById('refreshBtn').onclick = loadStockData; document.getElementById('exportBtn').onclick = () => exportToCSV(CACHE.stock, 'Stock_Analysis');
